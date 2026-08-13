@@ -1,9 +1,5 @@
 import { z } from "zod";
-import { invokeLLM } from "./_core/llm";
-import { COOKIE_NAME } from "@shared/const";
-import { getSessionCookieOptions } from "./_core/cookies";
-import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, router } from "./_core/trpc";
 import {
   createActivity,
   createComment,
@@ -24,24 +20,8 @@ import { activityEventValues, relationshipTypeValues, taskPriorityValues, taskSt
 const taskStatus = z.enum(taskStatusValues);
 const taskPriority = z.enum(taskPriorityValues);
 const relationshipType = z.enum(relationshipTypeValues);
-type RelationshipType = (typeof relationshipTypeValues)[number];
-
-function textFromResponse(response: Awaited<ReturnType<typeof invokeLLM>>) {
-  const content = response.choices?.[0]?.message?.content;
-  return typeof content === "string" ? content : "";
-}
 
 export const appRouter = router({
-  system: systemRouter,
-  auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
-      return { success: true } as const;
-    }),
-  }),
-
   task: router({
     list: protectedProcedure.input(z.object({
       status: taskStatus.optional(),
@@ -131,75 +111,6 @@ export const appRouter = router({
       const comment = await createComment({ taskId: input.taskId, authorId: ctx.user.id, content: input.content });
       await createActivity({ taskId: input.taskId, actorId: ctx.user.id, eventType: "comment", message: "Added a comment.", metadata: { commentId: comment.id } });
       return comment;
-    }),
-  }),
-
-  assist: router({
-    writeDescription: protectedProcedure.input(z.object({ title: z.string().min(1), notes: z.string().optional() })).mutation(async ({ input }) => {
-      const response = await invokeLLM({
-        messages: [
-          { role: "system", content: "You write concise, practical task descriptions. Return only the description in clear prose, with a short objective and useful acceptance criteria." },
-          { role: "user", content: `Task title: ${input.title}\nAdditional notes: ${input.notes ?? "None"}` },
-        ],
-      });
-      return { text: textFromResponse(response) };
-    }),
-    suggestLinks: protectedProcedure.input(z.object({ taskId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      const task = await getTask(ctx.user.id, input.taskId);
-      if (!task) throw new Error("Task not found");
-      const candidates = (await listTasks(ctx.user.id)).filter(item => item.id !== task.id).slice(0, 50);
-      const response = await invokeLLM({
-        messages: [
-          { role: "system", content: "You are a task relationship analyst. Suggest only clearly useful relationships from the provided candidates. Use only these relationship labels: blocks, is blocked by, relates to, duplicates, parent/child. Return JSON matching the requested schema." },
-          { role: "user", content: JSON.stringify({ task, candidates }) },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "task_link_suggestions",
-            strict: true,
-            schema: {
-              type: "object",
-              properties: {
-                suggestions: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      taskId: { type: "integer" },
-                      relationshipType: { type: "string", enum: relationshipTypeValues },
-                      rationale: { type: "string" },
-                    },
-                    required: ["taskId", "relationshipType", "rationale"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["suggestions"],
-              additionalProperties: false,
-            },
-          },
-        },
-      });
-      const raw = textFromResponse(response);
-      try {
-        const parsed = JSON.parse(raw) as { suggestions?: Array<{ taskId: number; relationshipType: RelationshipType; rationale: string }> };
-        return { suggestions: (parsed.suggestions ?? []).filter(item => candidates.some(candidate => candidate.id === item.taskId)) };
-      } catch {
-        return { suggestions: [] as Array<{ taskId: number; relationshipType: RelationshipType; rationale: string }> };
-      }
-    }),
-    summarizeChain: protectedProcedure.input(z.object({ taskId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      const task = await getTask(ctx.user.id, input.taskId);
-      if (!task) throw new Error("Task not found");
-      const links = await listTaskLinks(ctx.user.id, input.taskId);
-      const response = await invokeLLM({
-        messages: [
-          { role: "system", content: "Summarize the current state of this task chain for a busy operator. Mention blockers, next action, and risk. Keep it under 120 words." },
-          { role: "user", content: JSON.stringify({ task, links }) },
-        ],
-      });
-      return { text: textFromResponse(response) };
     }),
   }),
 });

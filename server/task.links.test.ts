@@ -2,10 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { relationshipTypeValues, taskStatusValues } from "../drizzle/schema";
 import type { TrpcContext } from "./_core/context";
 
-vi.mock("./_core/llm", () => ({
-  invokeLLM: vi.fn(async () => ({ choices: [{ message: { content: "Generated task description." } }] })),
-}));
-
 vi.mock("./db", () => ({
   createActivity: vi.fn(async (values: Record<string, unknown>) => ({ id: 1, ...values, createdAt: new Date() })),
   createComment: vi.fn(async (values: Record<string, unknown>) => ({ id: 21, ...values, createdAt: new Date(), updatedAt: new Date() })),
@@ -125,11 +121,5 @@ describe("Task CRM relationship contracts", () => {
     const caller = appRouter.createCaller(createContext());
     await caller.task.list({ status: "Blocked", relationshipType: "blocks" });
     expect(listTasks).toHaveBeenCalledWith(42, expect.objectContaining({ status: "Blocked", relationshipType: "blocks" }));
-  });
-
-  it("returns server-side LLM description output", async () => {
-    const caller = appRouter.createCaller(createContext());
-    const result = await caller.assist.writeDescription({ title: "Prepare launch notes" });
-    expect(result.text).toBe("Generated task description.");
   });
 });

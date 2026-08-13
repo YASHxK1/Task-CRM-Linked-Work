@@ -1,7 +1,7 @@
 # Render Blueprint for Task CRM (Linked Work)
 # Deploy: push this repo to a Render Git repo (or use "New Blueprint" with
-# this file), set the vault-secret env vars below, and Render will build the
-# Docker image and provision a managed MySQL database.
+# this file). Render will build the Docker image and provision a managed
+# MySQL database. No external credentials are required.
 
 databases:
   - name: task-crm-db
@@ -22,23 +22,3 @@ services:
         fromDatabase:
           name: task-crm-db
           property: connectionString
-      # Signing secret for session cookies (generate a long random string)
-      - key: JWT_SECRET
-        generateValue: true
-      # Manus OAuth + platform integration - fill these in the Render dashboard
-      - key: VITE_APP_ID
-        sync: false
-      - key: VITE_OAUTH_PORTAL_URL
-        sync: false
-      - key: OAUTH_SERVER_URL
-        sync: false
-      - key: OWNER_OPEN_ID
-        sync: false
-      - key: BUILT_IN_FORGE_API_URL
-        sync: false
-      - key: BUILT_IN_FORGE_API_KEY
-        sync: false
-      - key: VITE_FRONTEND_FORGE_API_URL
-        sync: false
-      - key: VITE_FRONTEND_FORGE_API_KEY
-        sync: false

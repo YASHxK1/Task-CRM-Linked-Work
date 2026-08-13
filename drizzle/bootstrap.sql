@@ -62,3 +62,9 @@ CREATE TABLE IF NOT EXISTS `activityLogs` (
   `createdAt` timestamp NOT NULL DEFAULT (now()),
   PRIMARY KEY (`id`)
 );
+
+-- Single-user workspace: seed the owner (admin) account. Idempotent via the
+-- unique openId key.
+INSERT INTO `users` (`openId`, `name`, `email`, `loginMethod`, `role`)
+VALUES ('owner', 'Owner', NULL, NULL, 'admin')
+ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `role` = VALUES(`role`);
