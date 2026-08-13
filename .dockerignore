@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.pnpm-store
+.manus-logs
+*.log
+coverage
+.vscode
+.idea
+*.md

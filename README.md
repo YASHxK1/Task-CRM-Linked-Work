@@ -51,6 +51,25 @@ Copy the required variables into a `.env` file (see `server/_core/env.ts` for ho
 
 > This app is designed to run on the Manus platform. OAuth login, LLM assistance, notifications, and the storage proxy depend on external Manus services — they will not work without the credentials above.
 
+## Deploying to Render
+
+This repo ships a `Dockerfile` (multi-stage: builds with Vite + esbuild, runs
+with production deps only) and a `render.yaml` blueprint.
+
+**On Render (recommended):** push this repo to GitHub, then in Render choose
+*New → Blueprint* and point it at this repo. It provisions the MySQL database
+and web service, and auto-applies the schema on container start.
+
+**Or manually:** create a *Web Service* from the repo with `Runtime: Docker`.
+Set the env vars below (from the [table](#environment-variables) — note
+`VITE_*` values are baked into the client at build time). Attach a Render
+MySQL database and set `DATABASE_URL` to its connection string.
+
+The container runs `node dist/ensureSchema.js` before starting the server; this
+creates the tables (`CREATE TABLE IF NOT EXISTS`) so a fresh deploy works with
+no manual DB setup. The schema is read from `drizzle/schema.ts` — if you add
+tables, update `drizzle/bootstrap.sql` too.
+
 ## Database
 
 Migrations live in `drizzle/`. Apply them with:

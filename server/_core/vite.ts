@@ -3,10 +3,14 @@ import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
 import path from "path";
-import { createServer as createViteServer } from "vite";
-import viteConfig from "../../vite.config";
+import { pathToFileURL } from "node:url";
 
 export async function setupVite(app: Express, server: Server) {
+  const { createServer: createViteServer } = await import("vite");
+  const configUrl = pathToFileURL(
+    path.resolve(import.meta.dirname, "../..", "vite.config.ts")
+  ).href;
+  const { default: viteConfig } = await import(/* @vite-ignore */ configUrl);
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
