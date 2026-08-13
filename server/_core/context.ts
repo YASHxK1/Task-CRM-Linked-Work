@@ -1,28 +1,23 @@
-import type { CreateExpressContextOptions } from "@trpc/server/adapters/express";
-import type { User } from "../../drizzle/schema";
-import { sdk } from "./sdk";
+import type { User } from "../schema";
 
-export type TrpcContext = {
-  req: CreateExpressContextOptions["req"];
-  res: CreateExpressContextOptions["res"];
-  user: User | null;
+// Single-user workspace: no accounts, no login. Every request acts as the
+// workspace owner so the existing tRPC procedures keep working unchanged.
+export const SINGLE_USER: User = {
+  id: 1,
+  openId: "workspace-owner",
+  name: "Workspace Owner",
+  email: null,
+  loginMethod: null,
+  role: "admin",
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  lastSignedIn: new Date(),
 };
 
-export async function createContext(
-  opts: CreateExpressContextOptions
-): Promise<TrpcContext> {
-  let user: User | null = null;
+export type TrpcContext = {
+  user: User;
+};
 
-  try {
-    user = await sdk.authenticateRequest(opts.req);
-  } catch (error) {
-    // Authentication is optional for public procedures.
-    user = null;
-  }
-
-  return {
-    req: opts.req,
-    res: opts.res,
-    user,
-  };
+export async function createContext(_opts?: unknown): Promise<TrpcContext> {
+  return { user: SINGLE_USER };
 }

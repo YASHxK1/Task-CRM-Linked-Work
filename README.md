@@ -1,8 +1,8 @@
 # Task CRM — Linked Work
 
-A task management app with intelligent, linkable tasks. Track work items across a dashboard, a Kanban board, and a filterable table — then connect tasks to each other (blocks / is blocked by / relates to / duplicates / parent-child) and let an LLM help you write descriptions, suggest relationships, and summarize task chains.
+A task management app with intelligent, linkable tasks. Track work items across a dashboard, a Kanban board, and a filterable table — then connect tasks to each other (blocks / is blocked by / relates to / duplicates / parent-child) and watch the dependency chain grow.
 
-A brutalist black-and-white UI, built on React 19 + Vite with a tRPC + Drizzle backend.
+A brutalist black-and-white UI, built on React 19 + Vite with a tRPC backend, deployed on **Vercel** with **Vercel KV** for persistence.
 
 ## Features
 
@@ -11,73 +11,65 @@ A brutalist black-and-white UI, built on React 19 + Vite with a tRPC + Drizzle b
 - **List / table view** — advanced filtering by status, priority, due date, and relationships
 - **Task detail** — rich fields (title, description, due date, assignee, status, priority) plus comments and a full activity log (status changes, links, comments, edits)
 - **Task linking** — define `blocks`, `is blocked by`, `relates to`, `duplicates`, and `parent/child` relationships with quick-link search
-- **LLM assistance** — write descriptions, suggest actionable links, and summarize task chains (via the Manus Forge API)
 
 ## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Frontend | React 19, Vite 7, TypeScript, Tailwind CSS 4, shadcn/ui (Radix), TanStack Query, wouter, recharts, framer-motion |
-| Backend | Node.js, Express, tRPC 11, Zod, Drizzle ORM (mysql2) |
-| Database | MySQL |
-| Auth | Manus platform OAuth + signed JWT session cookies (jose) |
-| LLM / integrations | Manus Forge API (LLM, notifications, storage proxy) |
+| Backend (Vercel) | tRPC 11, Zod, superjson — Vercel Node serverless functions (`api/trpc/[...trpc].ts`) |
+| Database | Vercel KV (Upstash Redis) — single-user workspace stored as a JSON document |
+| Auth | None — single-user workspace, no login |
 | Testing | Vitest |
 
 ## Getting started
 
 ```bash
 pnpm install
-pnpm dev        # start the dev server (Vite + tRPC API)
+pnpm dev        # start the local dev server (Vite + tRPC API)
 ```
 
 The dev server starts on `http://localhost:3000/` (falls back to a free port if busy).
 
 ## Environment variables
 
-Copy the required variables into a `.env` file (see `server/_core/env.ts` for how they are read).
-
 | Variable | Required | Purpose |
 |---|---|---|
-| `VITE_APP_ID` | yes | Manus OAuth app id |
-| `VITE_OAUTH_PORTAL_URL` | yes | OAuth sign-in portal URL |
-| `OAUTH_SERVER_URL` | yes | Manus OAuth token/userinfo endpoint |
-| `JWT_SECRET` | yes | Secret used to sign session cookies |
-| `DATABASE_URL` | yes | MySQL connection string |
-| `OWNER_OPEN_ID` | no | OpenID of the admin/owner |
-| `BUILT_IN_FORGE_API_URL` | for LLM features | Forge API base URL |
-| `BUILT_IN_FORGE_API_KEY` | for LLM features | Forge API key |
-| `PORT` | no | Server port (default 3000) |
+| `KV_REST_API_URL` | for cross-device persistence | Vercel KV REST endpoint (auto-injected when you link a KV store) |
+| `KV_REST_API_TOKEN` | for cross-device persistence | Vercel KV REST token (auto-injected when you link a KV store) |
+| `PORT` | no | Local server port (default 3000) |
 
-> This app is designed to run on the Manus platform. OAuth login, LLM assistance, notifications, and the storage proxy depend on external Manus services — they will not work without the credentials above.
+> Without `KV_REST_API_URL`/`KV_REST_API_TOKEN` the app falls back to an in-memory store: great for local development and tests, but data is lost on restart and not shared across devices. Link a Vercel KV store to get real cross-device persistence.
 
 ## Database
 
-Migrations live in `drizzle/`. Apply them with:
+The whole single-user workspace (tasks, links, comments, activity log) lives under one JSON document in Vercel KV, so a single read/write is atomic and works from any device. No schema migrations are needed — the document shape is defined in `server/schema.ts` and read/written in `server/db.ts`.
 
-```bash
-pnpm db:push
-```
+## Deployment (Vercel)
+
+1. Push this repository to GitHub.
+2. Import it into Vercel. `vercel.json` already configures the build (`vite build`) and the static output directory, plus an SPA rewrite for client-side routes (`/board`, `/tasks`).
+3. The API runs as the serverless function at `api/trpc/[...trpc].ts` (serving `/api/trpc`).
+4. Create a **Vercel KV** store in the project dashboard and link it to the project. Vercel injects `KV_REST_API_URL` and `KV_REST_API_TOKEN` automatically — no manual config needed.
 
 ## Scripts
 
 | Command | Description |
 |---|---|
-| `pnpm dev` | Run the dev server with hot reload |
-| `pnpm build` | Build the client (Vite) and bundle the server (esbuild) into `dist/` |
-| `pnpm start` | Run the production server (`NODE_ENV=production`) |
+| `pnpm dev` | Run the local dev server with hot reload (Vite + tRPC) |
+| `pnpm build` | Build the client (Vite) into `dist/public` |
+| `pnpm start` | Serve the built client + API locally (production mode preview) |
 | `pnpm check` | Type-check the project (`tsc --noEmit`) |
 | `pnpm test` | Run the Vitest test suite |
 | `pnpm format` | Format the codebase with Prettier |
-| `pnpm db:push` | Generate and apply database migrations |
 
 ## Project layout
 
 ```
+api/       Vercel serverless function (tRPC catch-all)
 client/    React frontend (Vite)
-server/    Express + tRPC backend
+server/    tRPC routers, KV data layer, schema
 shared/    Shared constants and types between client and server
-drizzle/   Database schema and migrations
 ```
 
 ## License

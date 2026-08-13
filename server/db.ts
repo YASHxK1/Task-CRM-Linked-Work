@@ -1,5 +1,4 @@
-import { and, asc, desc, eq, gte, lte, ne, or, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+import { kv } from "@vercel/kv";
 import {
   ActivityLog,
   Comment,
@@ -7,67 +6,69 @@ import {
   InsertComment,
   InsertTask,
   InsertTaskLink,
-  InsertUser,
   Task,
   TaskLink,
-  User,
-  activityLogs,
-  comments,
-  taskLinks,
-  tasks,
-  users,
-} from "../drizzle/schema";
-import { ENV } from "./_core/env";
+} from "./schema";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+const WORKSPACE_KEY = "task-crm:workspace";
 
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
-  }
-  return _db;
+type WorkspaceDoc = {
+  tasks: Task[];
+  taskLinks: TaskLink[];
+  comments: Comment[];
+  activityLogs: ActivityLog[];
+  seq: { tasks: number; taskLinks: number; comments: number; activityLogs: number };
+};
+
+function emptyDoc(): WorkspaceDoc {
+  return { tasks: [], taskLinks: [], comments: [], activityLogs: [], seq: { tasks: 0, taskLinks: 0, comments: 0, activityLogs: 0 } };
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) throw new Error("User openId is required for upsert");
-  const db = await getDb();
-  if (!db) return;
-
-  const values: typeof user = { openId: user.openId };
-  const updateSet: Record<string, unknown> = {};
-  const textFields = ["name", "email", "loginMethod"] as const;
-  for (const field of textFields) {
-    if (user[field] !== undefined) {
-      values[field] = user[field] ?? null;
-      updateSet[field] = user[field] ?? null;
-    }
-  }
-  if (user.lastSignedIn !== undefined) {
-    values.lastSignedIn = user.lastSignedIn;
-    updateSet.lastSignedIn = user.lastSignedIn;
-  }
-  if (user.role !== undefined) {
-    values.role = user.role;
-    updateSet.role = user.role;
-  } else if (user.openId === ENV.ownerOpenId) {
-    values.role = "admin";
-    updateSet.role = "admin";
-  }
-  if (!values.lastSignedIn) values.lastSignedIn = new Date();
-  if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
-  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+function kvConfigured(): boolean {
+  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 }
 
-export async function getUserByOpenId(openId: string): Promise<User | undefined> {
-  const db = await getDb();
-  if (!db) return undefined;
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return result[0];
+// Local fallback so the app (and tests) still work before a Vercel KV store is
+// linked. Not shared across devices — use KV in production for cross-device
+// persistence.
+let memoryDoc: WorkspaceDoc | null = null;
+
+function toDate(value: Date | string | number | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  return value instanceof Date ? value : new Date(value as string | number);
+}
+
+function hydrateTask(task: Task): Task {
+  return { ...task, dueDate: toDate(task.dueDate), createdAt: toDate(task.createdAt)!, updatedAt: toDate(task.updatedAt)! };
+}
+
+function hydrateLink(link: TaskLink): TaskLink {
+  return { ...link, createdAt: toDate(link.createdAt)! };
+}
+
+function hydrateComment(comment: Comment): Comment {
+  return { ...comment, createdAt: toDate(comment.createdAt)!, updatedAt: toDate(comment.updatedAt)! };
+}
+
+function hydrateActivity(activity: ActivityLog): ActivityLog {
+  return { ...activity, createdAt: toDate(activity.createdAt)! };
+}
+
+async function getDoc(): Promise<WorkspaceDoc> {
+  if (!kvConfigured()) {
+    if (!memoryDoc) memoryDoc = emptyDoc();
+    return memoryDoc;
+  }
+  const doc = await kv.get<WorkspaceDoc>(WORKSPACE_KEY);
+  return doc ?? emptyDoc();
+}
+
+async function saveDoc(doc: WorkspaceDoc): Promise<void> {
+  if (!kvConfigured()) {
+    memoryDoc = doc;
+    return;
+  }
+  await kv.set(WORKSPACE_KEY, doc);
 }
 
 export async function listTasks(ownerId: number, filters?: {
@@ -77,124 +78,173 @@ export async function listTasks(ownerId: number, filters?: {
   search?: string;
   linkedTaskId?: number;
   relationshipType?: TaskLink["relationshipType"];
-}) {
-  const db = await getDb();
-  if (!db) return [] as Task[];
-  const conditions = [eq(tasks.ownerId, ownerId)];
-  if (filters?.status) conditions.push(eq(tasks.status, filters.status));
-  if (filters?.priority) conditions.push(eq(tasks.priority, filters.priority));
-  if (filters?.due === "overdue") conditions.push(and(lte(tasks.dueDate, new Date()), ne(tasks.status, "Done"))!);
-  if (filters?.due === "upcoming") conditions.push(and(gte(tasks.dueDate, new Date()), ne(tasks.status, "Done"))!);
-  if (filters?.search) conditions.push(sql`LOWER(${tasks.title}) LIKE ${`%${filters.search.toLowerCase()}%`}`);
-  if (filters?.linkedTaskId || filters?.relationshipType) {
-    const linkConditions = [eq(taskLinks.ownerId, ownerId)];
-    if (filters.relationshipType) linkConditions.push(eq(taskLinks.relationshipType, filters.relationshipType));
-    if (filters.linkedTaskId) linkConditions.push(or(eq(taskLinks.sourceTaskId, filters.linkedTaskId), eq(taskLinks.targetTaskId, filters.linkedTaskId))!);
-    const linked = await db.select({ sourceTaskId: taskLinks.sourceTaskId, targetTaskId: taskLinks.targetTaskId })
-      .from(taskLinks)
-      .where(and(...linkConditions));
-    const ids = linked.flatMap(item => [item.sourceTaskId, item.targetTaskId]).filter(id => id !== filters.linkedTaskId);
-    if (!ids.length) return [] as Task[];
-    conditions.push(sql`${tasks.id} IN (${sql.join(ids.map(id => sql`${id}`), sql`, `)})`);
+}): Promise<Task[]> {
+  const doc = await getDoc();
+  let result = doc.tasks.filter(task => task.ownerId === ownerId);
+
+  if (filters?.status) result = result.filter(task => task.status === filters.status);
+  if (filters?.priority) result = result.filter(task => task.priority === filters.priority);
+
+  const now = new Date();
+  if (filters?.due === "overdue") result = result.filter(task => task.dueDate !== null && new Date(task.dueDate) < now && task.status !== "Done");
+  if (filters?.due === "upcoming") result = result.filter(task => task.dueDate !== null && new Date(task.dueDate) >= now && task.status !== "Done");
+  if (filters?.search) {
+    const query = filters.search.toLowerCase();
+    result = result.filter(task => task.title.toLowerCase().includes(query));
   }
-  return db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.updatedAt));
+  if (filters?.linkedTaskId || filters?.relationshipType) {
+    const linked = doc.taskLinks.filter(link =>
+      link.ownerId === ownerId &&
+      (!filters.relationshipType || link.relationshipType === filters.relationshipType) &&
+      (!filters.linkedTaskId || link.sourceTaskId === filters.linkedTaskId || link.targetTaskId === filters.linkedTaskId)
+    );
+    const ids = new Set(linked.flatMap(link => [link.sourceTaskId, link.targetTaskId]).filter(id => id !== filters.linkedTaskId));
+    if (ids.size === 0) return [];
+    result = result.filter(task => ids.has(task.id));
+  }
+
+  return result
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .map(hydrateTask);
 }
 
-export async function getTask(ownerId: number, taskId: number) {
-  const db = await getDb();
-  if (!db) return undefined;
-  const result = await db.select().from(tasks).where(and(eq(tasks.ownerId, ownerId), eq(tasks.id, taskId))).limit(1);
-  return result[0];
+export async function getTask(ownerId: number, taskId: number): Promise<Task | undefined> {
+  const doc = await getDoc();
+  const task = doc.tasks.find(item => item.ownerId === ownerId && item.id === taskId);
+  return task ? hydrateTask(task) : undefined;
 }
 
 export async function createTask(values: InsertTask): Promise<Task> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  const result = await db.insert(tasks).values(values);
-  const created = await db.select().from(tasks).where(eq(tasks.id, result[0].insertId)).limit(1);
-  if (!created[0]) throw new Error("Task was not created");
-  return created[0];
+  const doc = await getDoc();
+  const now = new Date();
+  const task: Task = {
+    id: ++doc.seq.tasks,
+    ownerId: values.ownerId!,
+    assigneeId: values.assigneeId ?? null,
+    title: values.title!,
+    description: values.description ?? null,
+    status: values.status ?? "To Do",
+    priority: values.priority ?? "Medium",
+    dueDate: values.dueDate ?? null,
+    createdAt: values.createdAt ?? now,
+    updatedAt: values.updatedAt ?? now,
+  };
+  doc.tasks.push(task);
+  await saveDoc(doc);
+  return hydrateTask(task);
 }
 
 export async function updateTask(ownerId: number, taskId: number, values: Partial<InsertTask>): Promise<Task> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  await db.update(tasks).set(values).where(and(eq(tasks.ownerId, ownerId), eq(tasks.id, taskId)));
-  const updated = await getTask(ownerId, taskId);
-  if (!updated) throw new Error("Task not found");
-  return updated;
+  const doc = await getDoc();
+  const index = doc.tasks.findIndex(item => item.ownerId === ownerId && item.id === taskId);
+  if (index === -1) throw new Error("Task not found");
+  const updated: Task = { ...doc.tasks[index], ...values, id: taskId, ownerId, updatedAt: new Date() };
+  doc.tasks[index] = updated;
+  await saveDoc(doc);
+  return hydrateTask(updated);
 }
 
-export async function deleteTask(ownerId: number, taskId: number) {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  await db.delete(activityLogs).where(eq(activityLogs.taskId, taskId));
-  await db.delete(comments).where(eq(comments.taskId, taskId));
-  await db.delete(taskLinks).where(or(eq(taskLinks.sourceTaskId, taskId), eq(taskLinks.targetTaskId, taskId)));
-  await db.delete(tasks).where(and(eq(tasks.ownerId, ownerId), eq(tasks.id, taskId)));
+export async function deleteTask(ownerId: number, taskId: number): Promise<void> {
+  const doc = await getDoc();
+  doc.tasks = doc.tasks.filter(task => !(task.ownerId === ownerId && task.id === taskId));
+  doc.taskLinks = doc.taskLinks.filter(link => !(link.sourceTaskId === taskId || link.targetTaskId === taskId));
+  doc.comments = doc.comments.filter(comment => comment.taskId !== taskId);
+  doc.activityLogs = doc.activityLogs.filter(activity => activity.taskId !== taskId);
+  await saveDoc(doc);
 }
 
-export async function listTaskLinks(ownerId: number, taskId: number) {
-  const db = await getDb();
-  if (!db) return [];
-  const links = await db.select().from(taskLinks).where(and(eq(taskLinks.ownerId, ownerId), or(eq(taskLinks.sourceTaskId, taskId), eq(taskLinks.targetTaskId, taskId)))).orderBy(desc(taskLinks.createdAt));
-  const connectedIds = links.map(link => link.sourceTaskId === taskId ? link.targetTaskId : link.sourceTaskId);
-  const connected = connectedIds.length ? await db.select().from(tasks).where(sql`${tasks.id} IN (${sql.join(connectedIds.map(id => sql`${id}`), sql`, `)})`) : [];
-  return links.map(link => ({
-    ...link,
-    task: connected.find(item => item.id === (link.sourceTaskId === taskId ? link.targetTaskId : link.sourceTaskId)),
-    direction: link.sourceTaskId === taskId ? "outgoing" : "incoming" as const,
-  }));
+export async function listTaskLinks(ownerId: number, taskId: number): Promise<Array<TaskLink & { task?: Task; direction: "outgoing" | "incoming" }>> {
+  const doc = await getDoc();
+  const links = doc.taskLinks
+    .filter(link => link.ownerId === ownerId && (link.sourceTaskId === taskId || link.targetTaskId === taskId))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .map(hydrateLink);
+  return links.map(link => {
+    const connectedId = link.sourceTaskId === taskId ? link.targetTaskId : link.sourceTaskId;
+    const connected = doc.tasks.find(task => task.id === connectedId);
+    return {
+      ...link,
+      task: connected ? hydrateTask(connected) : undefined,
+      direction: link.sourceTaskId === taskId ? "outgoing" as const : "incoming" as const,
+    };
+  });
 }
 
 export async function createTaskLink(values: InsertTaskLink): Promise<TaskLink> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  const result = await db.insert(taskLinks).values(values);
-  const created = await db.select().from(taskLinks).where(eq(taskLinks.id, result[0].insertId)).limit(1);
-  if (!created[0]) throw new Error("Link was not created");
-  return created[0];
+  const doc = await getDoc();
+  const link: TaskLink = {
+    id: ++doc.seq.taskLinks,
+    ownerId: values.ownerId!,
+    sourceTaskId: values.sourceTaskId,
+    targetTaskId: values.targetTaskId,
+    relationshipType: values.relationshipType,
+    createdBy: values.createdBy,
+    createdAt: values.createdAt ?? new Date(),
+  };
+  doc.taskLinks.push(link);
+  await saveDoc(doc);
+  return hydrateLink(link);
 }
 
-export async function deleteTaskLink(ownerId: number, linkId: number) {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  await db.delete(taskLinks).where(and(eq(taskLinks.ownerId, ownerId), eq(taskLinks.id, linkId)));
+export async function deleteTaskLink(ownerId: number, linkId: number): Promise<void> {
+  const doc = await getDoc();
+  doc.taskLinks = doc.taskLinks.filter(link => !(link.ownerId === ownerId && link.id === linkId));
+  await saveDoc(doc);
 }
 
-export async function listComments(taskId: number) {
-  const db = await getDb();
-  if (!db) return [] as Comment[];
-  return db.select().from(comments).where(eq(comments.taskId, taskId)).orderBy(asc(comments.createdAt));
+export async function listComments(taskId: number): Promise<Comment[]> {
+  const doc = await getDoc();
+  return doc.comments
+    .filter(comment => comment.taskId === taskId)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+    .map(hydrateComment);
 }
 
 export async function createComment(values: InsertComment): Promise<Comment> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  const result = await db.insert(comments).values(values);
-  const created = await db.select().from(comments).where(eq(comments.id, result[0].insertId)).limit(1);
-  if (!created[0]) throw new Error("Comment was not created");
-  return created[0];
+  const doc = await getDoc();
+  const now = new Date();
+  const comment: Comment = {
+    id: ++doc.seq.comments,
+    taskId: values.taskId,
+    authorId: values.authorId,
+    content: values.content,
+    createdAt: values.createdAt ?? now,
+    updatedAt: values.updatedAt ?? now,
+  };
+  doc.comments.push(comment);
+  await saveDoc(doc);
+  return hydrateComment(comment);
 }
 
 export async function createActivity(values: InsertActivityLog): Promise<ActivityLog> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  const result = await db.insert(activityLogs).values(values);
-  const created = await db.select().from(activityLogs).where(eq(activityLogs.id, result[0].insertId)).limit(1);
-  if (!created[0]) throw new Error("Activity was not created");
-  return created[0];
+  const doc = await getDoc();
+  const activity: ActivityLog = {
+    id: ++doc.seq.activityLogs,
+    taskId: values.taskId,
+    actorId: values.actorId,
+    eventType: values.eventType,
+    message: values.message,
+    metadata: values.metadata ?? null,
+    createdAt: values.createdAt ?? new Date(),
+  };
+  doc.activityLogs.push(activity);
+  await saveDoc(doc);
+  return hydrateActivity(activity);
 }
 
-export async function listActivity(taskId: number) {
-  const db = await getDb();
-  if (!db) return [] as ActivityLog[];
-  return db.select().from(activityLogs).where(eq(activityLogs.taskId, taskId)).orderBy(desc(activityLogs.createdAt));
+export async function listActivity(taskId: number): Promise<ActivityLog[]> {
+  const doc = await getDoc();
+  return doc.activityLogs
+    .filter(activity => activity.taskId === taskId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .map(hydrateActivity);
 }
 
-export async function getDashboard(ownerId: number) {
-  const db = await getDb();
-  if (!db) return { counts: { "To Do": 0, "In Progress": 0, Done: 0, Blocked: 0 }, overdue: [], recent: [] };
+export async function getDashboard(ownerId: number): Promise<{
+  counts: { "To Do": number; "In Progress": number; Done: number; Blocked: number };
+  overdue: Task[];
+  recent: Task[];
+}> {
   const allTasks = await listTasks(ownerId);
   const counts = {
     "To Do": allTasks.filter(task => task.status === "To Do").length,
@@ -202,7 +252,7 @@ export async function getDashboard(ownerId: number) {
     Done: allTasks.filter(task => task.status === "Done").length,
     Blocked: allTasks.filter(task => task.status === "Blocked").length,
   };
-  const overdue = allTasks.filter(task => task.dueDate && task.dueDate < new Date() && task.status !== "Done").slice(0, 5);
+  const overdue = allTasks.filter(task => task.dueDate && new Date(task.dueDate) < new Date() && task.status !== "Done").slice(0, 5);
   const recent = allTasks.slice(0, 6);
   return { counts, overdue, recent };
 }
